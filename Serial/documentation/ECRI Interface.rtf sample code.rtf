@@ -1,0 +1,758 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1348\cocoasubrtf170
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural
+
+\f0\fs24 \cf0 using System;\
+using System.Drawing;\
+using System.Collections;\
+using System.ComponentModel;\
+using System.Windows.Forms;\
+\
+namespace KuberaSoftPayInterface\
+\{\
+	/// <summary>\
+	/// Summary description for SoftPayConnectionForm.\
+	/// </summary>\
+    public class SoftPayConnection : System.Windows.Forms.Form\
+    \{\
+        private bool LoggingEnabled = false;\
+        KuberaDALCon.KuberaLogFile versaLog = new KuberaDALCon.KuberaLogFile("Versapay.log");\
+        public SoftPayResult Result = new SoftPayResult();\
+        public string RawSoftPayResultString = "";\
+\
+        public enum TransactionType\
+        \{\
+            ResetInterface,\
+            Void,\
+            CreditCardSaleOrRefund,\
+            DebitCardSaleOrRefund,\
+            PreAuth,\
+            PreAuthComplete,\
+            AuthOnly\
+        \}\
+\
+        const string STX = "\\x02";\
+        const string ETX = "\\x03";\
+        const string ACK = "\\x06";\
+        const string NAK = "\\x15";\
+\
+        // Port Settings\
+        private SerialNET.Port port;\
+        private int Com = 1;\
+        private int Baud = 9600;\
+        private int Databits = 7;\
+        private double StopBits = 1;\
+        private string Parity = "EVEN";\
+        private string FlowControl = "NONE";\
+\
+        public TransactionType TrxType;\
+        public decimal Amount = 0;\
+        public decimal TaxAmount = 0;\
+        public decimal TipAmount = 0;\
+\
+        // Timeout Settings\
+        private int ACKTimeout = 10000;\
+        private int TransactionTimeout = 0; //30000;\
+        private System.Windows.Forms.Label lblStatus;\
+\
+        private System.Threading.Thread WorkThread;\
+        private KuberaDALCon.CustomAppSettings settings = new KuberaDALCon.CustomAppSettings();\
+        private NoProgress.NoProgressBar noProgressBar1;\
+        private System.Windows.Forms.Button btnCancel;\
+\
+        /// <summary>\
+        /// Required designer variable.\
+        /// </summary>\
+        private System.ComponentModel.Container components = null;\
+\
+        public SoftPayConnection(TransactionType trxType, decimal amount, decimal taxAmount, decimal tipAmount)\
+        \{\
+            //\
+            // Required for Windows Form Designer support\
+            //\
+            InitializeComponent();\
+\
+            //\
+            // TODO: Add any constructor code after InitializeComponent call\
+            //\
+\
+            this.BackColor = KuberaServices.ColourFunctions.GenerateColourFromRGBString(settings.Get("WindowPrimaryColor"));\
+            this.btnCancel.BackColor = KuberaServices.ColourFunctions.GenerateColourFromRGBString(settings.Get("ButtonBackColor"));\
+\
+            LoggingEnabled = KuberaDALCon.Flags.IsSet(KuberaServices.UtilityFunctions.GetCompanyEntity().CPY_FlagsField1, (int)KuberaDALCon.Flags.CompanySettings.VerboseErrors);\
+            TrxType = trxType;\
+            Amount = amount;\
+            TaxAmount = taxAmount;\
+            TipAmount = tipAmount;\
+        \}\
+\
+        delegate void Function();\
+\
+        private void SoftPayConnection_Load(object sender, System.EventArgs e)\
+        \{\
+            WorkThread = new System.Threading.Thread(new System.Threading.ThreadStart(Send));\
+            WorkThread.Start();\
+        \}\
+\
+        private void Send()\
+        \{\
+            if (this.InvokeRequired)\
+                this.Invoke(new Function(delegate() \{ this.Show(); \}));\
+            else\
+                this.Show();\
+\
+            System.Threading.Thread.Sleep(500);\
+\
+            string message = GetFormattedMessage();\
+\
+            string response = "";\
+\
+            if (TrxType == TransactionType.ResetInterface)\
+                SendAndReceieveResetInterface(message);\
+            else\
+            \{\
+                response = SendAndReceiveTransaction(message);\
+                if (response != null && response.Trim().Length > 0)\
+                    HandleResponse(response);\
+            \}\
+\
+            port.Dispose();\
+            if (this.InvokeRequired)\
+                this.Invoke(new Function(delegate() \{ this.Close(); \}));\
+            else\
+                this.Close();\
+        \}\
+\
+        #region GetFormattedMessage\
+\
+        private string GetFormattedMessage()\
+        \{\
+            string message = "";\
+\
+            switch (TrxType)\
+            \{\
+                case TransactionType.ResetInterface: message = GetResetInterfaceMessage(); break;\
+                case TransactionType.CreditCardSaleOrRefund: message = GetSaleOrRefundMessage(); break;\
+                case TransactionType.DebitCardSaleOrRefund: message = GetSaleOrRefundMessage(); break;\
+                case TransactionType.Void: message = GetVoidMessage(); break;\
+                case TransactionType.PreAuth: message = GetPreAuthMessage(); break;\
+                case TransactionType.PreAuthComplete: message = GetPreAuthCompleteMessage(); break;\
+                default: message = GetSaleOrRefundMessage(); break;\
+            \}\
+\
+            WrapUpMessage(ref message);\
+            return message;\
+        \}\
+\
+        private string GetResetInterfaceMessage()\
+        \{\
+            string message = "";\
+\
+            // Operation Code\
+            message += "10001" + "^";\
+            message += "0" + "^";\
+\
+            return message;\
+        \}\
+\
+        // Example: <STX>10001^1^10002^1^10007^15956^10008^921^10009^2500^10022^65613^<ETX><LRC>\
+        private string GetSaleOrRefundMessage()\
+        \{\
+            string message = "";\
+\
+            // Operation Code\
+            message += "10001" + "^";\
+            if (Amount > 0)\
+                message += "1" + "^";\
+            else if (Amount < 0)\
+                message += "262" + "^";\
+\
+            // Transaction Code\
+            message += "10002" + "^";\
+            if (Amount > 0)\
+                message += "1" + "^";\
+            else if (Amount < 0)\
+                message += "16" + "^";\
+\
+            // Transaction Amount\
+            message += "10007" + "^";\
+            message += Math.Round(Math.Abs(Amount) * 100, 0).ToString() + "^";\
+\
+            // Tax Amount\
+            message += "10008" + "^";\
+            message += Math.Round(Math.Abs(TaxAmount) * 100, 0).ToString() + "^";\
+\
+            // Tip Amount\
+            message += "10009" + "^";\
+            message += Math.Round(Math.Abs(TipAmount) * 100, 0).ToString() + "^";\
+\
+            // Clerk ID\
+            message += "10010" + "^";\
+            message += "" + "^";\
+\
+            // Trans Type Message\
+            message += "10022" + "^";\
+            if (Amount > 0)\
+                message += "65613" + "^";\
+            else\
+                message += "65769" + "^";\
+\
+            // Date\
+            message += "10027" + "^";\
+            message += GetSoftPayFormattedDate() + "^";\
+\
+            // Time\
+            message += "10028" + "^";\
+            message += GetSoftPayFormattedTime() + "^";\
+\
+            return message;\
+        \}\
+\
+        private string GetPreAuthCompleteMessage()\
+        \{\
+            string message = "";\
+\
+            // Operation Code\
+            message += "10001" + "^";\
+            message += "5" + "^";\
+\
+            // Transaction Code\
+            message += "10002" + "^";\
+            message += "3" + "^";\
+\
+            // Trans Type Message\
+            message += "10022" + "^";\
+            message += "1918894470" + "^";\
+\
+            // Date\
+            message += "10027" + "^";\
+            message += GetSoftPayFormattedDate() + "^";\
+\
+            // Time\
+            message += "10028" + "^";\
+            message += GetSoftPayFormattedTime() + "^";\
+\
+            return message;\
+        \}\
+\
+        private string GetPreAuthMessage()\
+        \{\
+            string message = "";\
+\
+            // Operation Code\
+            message += "10001" + "^";\
+            message += "4" + "^";\
+\
+            // Transaction Code\
+            message += "10002" + "^";\
+            message += "2" + "^";\
+\
+            // Transaction Amount\
+            message += "10007" + "^";\
+            message += Math.Round(Math.Abs(Amount) * 100, 0).ToString() + "^";\
+\
+            // Tax Amount\
+            message += "10008" + "^";\
+            message += Math.Round(Math.Abs(TaxAmount) * 100, 0).ToString() + "^";\
+\
+            // Tip Amount\
+            message += "10009" + "^";\
+            message += Math.Round(Math.Abs(TipAmount) * 100, 0).ToString() + "^";\
+\
+            // Trans Type Message\
+            message += "10022" + "^";\
+            message += "1918894468" + "^";\
+\
+            // Date\
+            message += "10027" + "^";\
+            message += GetSoftPayFormattedDate() + "^";\
+\
+            // Time\
+            message += "10028" + "^";\
+            message += GetSoftPayFormattedTime() + "^";\
+\
+            return message;\
+        \}\
+\
+        private string GetVoidMessage()\
+        \{\
+            string message = "";\
+\
+            // Operation Code\
+            message += "10001" + "^";\
+            message += "45" + "^";\
+\
+            // Transaction Code\
+            message += "10002" + "^";\
+            message += "10" + "^";\
+\
+            // Trans Type Message\
+            message += "10022" + "^";\
+            message += "65648" + "^";\
+\
+            // Date\
+            message += "10027" + "^";\
+            message += GetSoftPayFormattedDate() + "^";\
+\
+            // Time\
+            message += "10028" + "^";\
+            message += GetSoftPayFormattedTime() + "^";\
+\
+            return message;\
+        \}\
+\
+        private void WrapUpMessage(ref string message)\
+        \{\
+            // stick on the ETX\
+            message = message + ETX;\
+\
+            // LRC includes ETX but not STX (according to documentation) so get it here\
+            char LRC = GetLRCCharacter(message);\
+\
+            // tack on the stx and the LRC\
+            message = STX + message + GetLRCCharacter(message);\
+        \}\
+\
+        private char GetLRCCharacter(string data)\
+        \{\
+            int lrc = 0;\
+\
+            for (int i = 0; i < data.Length; i++)\
+                lrc = lrc ^ ((int)data[i]);\
+\
+            return Convert.ToChar(lrc);\
+        \}\
+\
+        private string GetSoftPayFormattedDate()\
+        \{\
+            return System.DateTime.Now.Month.ToString().PadLeft(2, '0')\
+                + System.DateTime.Now.Day.ToString().PadLeft(2, '0')\
+                + System.DateTime.Now.Year.ToString().Substring(2, 2);\
+        \}\
+\
+        private string GetSoftPayFormattedTime()\
+        \{\
+            return System.DateTime.Now.Hour.ToString().PadLeft(2, '0')\
+                + System.DateTime.Now.Minute.ToString().PadLeft(2, '0')\
+                + System.DateTime.Now.Second.ToString().PadLeft(2, '0');\
+        \}\
+\
+        #endregion\
+\
+        #region SendAndReceive\
+\
+        private string SendAndReceiveTransaction(string message)\
+        \{\
+            string response = "";\
+\
+            InitializePort();\
+\
+            WriteToPort(message);\
+\
+            bool initialACKReceieved = VeriftyACKReceived();\
+\
+            if (!initialACKReceieved)\
+            \{\
+                this.Result.KuberaFormattedResponseMessage = "Unable to communicate with pinpad.";\
+                return "";\
+            \}\
+\
+            response = GetResponse();\
+\
+            if (response == null || response.Trim().Length == 0)\
+            \{\
+                return "";\
+            \}\
+\
+            return response;\
+        \}\
+\
+        private string SendAndReceieveResetInterface(string message)\
+        \{\
+            string response = "";\
+\
+            InitializePort();\
+\
+            WriteToPort(message);\
+\
+            if (VeriftyACKReceived())\
+            \{\
+                SendACK();\
+                Result = new SoftPayResult();\
+                Result.KuberaFormattedResponseMessage = "Reset Successful";\
+            \}\
+            else\
+            \{\
+                Result = new SoftPayResult();\
+                Result.KuberaFormattedResponseMessage = "Reset Failed";\
+            \}\
+\
+            port.Dispose();\
+\
+            return response;\
+        \}\
+\
+        private string GetResponse()\
+        \{\
+            string response = ReceieveMessageFromPort(1);\
+\
+            return response;\
+        \}\
+\
+        private string ReceieveMessageFromPort(int attemptNumber)\
+        \{\
+            string message = "";\
+\
+            message = ReadFromPort(STX, ETX, TransactionTimeout);\
+            if (message != null && message.Trim().Length > 0)\
+            \{\
+                message += ReadFromPort(1, 5000);\
+                if (VerifyLRC(message))\
+                    SendACK();\
+                else\
+                \{\
+                    SendNAK();\
+                    if (attemptNumber <= 2)\
+                        return ReceieveMessageFromPort(attemptNumber + 1);\
+                    else\
+                    \{\
+                        this.Result.KuberaFormattedResponseMessage = "Response from pinpad was invalid (LRC check failed).";\
+                        return "";\
+                    \}\
+                \}\
+            \}\
+            else\
+            \{\
+                this.Result.KuberaFormattedResponseMessage = "Pinpad communication was lost during transaction.";\
+            \}\
+\
+            return message;\
+        \}\
+\
+        #endregion\
+\
+        #region HandleResponse\
+\
+        private void HandleResponse(string response)\
+        \{\
+            bool packetTranslationComplete = false;\
+            int cursor = 0;\
+\
+            RawSoftPayResultString = response;\
+            Result = new SoftPayResult();\
+\
+            response = response.Substring(1, response.Length - 3);\
+\
+            while (!packetTranslationComplete)\
+            \{\
+                int i = response.IndexOf("^", cursor); // first '^'\
+                int j = response.IndexOf("^", i + 1); // second '^'\
+\
+                string fieldAndValue = response.Substring(cursor, j - cursor + 1); // gets the field id and data\
+\
+                ProcessFieldAndValue(fieldAndValue);\
+\
+                if (j + 1 >= response.Length)\
+                    packetTranslationComplete = true;\
+                else\
+                    cursor = j + 1;\
+            \}\
+\
+            SetKuberaGeneratedResponseMessage();\
+        \}\
+\
+        private void SetKuberaGeneratedResponseMessage()\
+        \{\
+            if (Result.DeclineCode.Trim().Length > 0)\
+                Result.KuberaFormattedResponseMessage = "Transaction Declined";\
+            else if (Result.ApprovalCode.Trim().Length > 0\
+                || Result.ResponseCode == "A")\
+                Result.KuberaFormattedResponseMessage = "Transaction Authorized";\
+            else if (Result.ErrorCode.Trim().Length > 0)\
+            \{\
+                string errorTranslation = GetTranslatedErrorMessage();\
+                Result.KuberaFormattedResponseMessage = "SoftPay Error[" + Result.ErrorCode.Trim() + "] - " + errorTranslation;\
+            \}\
+        \}\
+\
+        private string GetTranslatedErrorMessage()\
+        \{\
+            switch (Result.ErrorCode.Trim())\
+            \{\
+                case "101": return "User Canceled during SoftPay processing";\
+                case "102": return "Formatting error in ECR\'eds transaction packet";\
+                case "103": return "Error occurred during SoftPay processing";\
+                case "104": return "Interface rejects current transaction because it is still waiting for a SoftPay response to previous transaction.";\
+                case "105": return "Not able to communicate with SoftPay application";\
+            \}\
+            return "";\
+        \}\
+\
+        private void ProcessFieldAndValue(string data)\
+        \{\
+            string[] split = data.Split('^');\
+\
+            string field = split[0].Trim();\
+            string val = split[1].Trim();\
+\
+            switch (field)\
+            \{\
+                case "11001": Result.CreditCardNumber = val; break;\
+                case "11002": Result.ExpirationDate = val; break;\
+                case "11003": Result.Amount = GetAmount(val); break;\
+                case "11004": Result.ApprovalCode = val; break;\
+                case "11005": Result.DeclineCode = val; break;\
+                case "11006": Result.TranCardType = val; break;\
+                case "11007": Result.Date = val; break;\
+                case "11008": Result.Time = val; break;\
+                case "11009": Result.InvoiceNumber = val; break;\
+                case "11010": Result.ErrorCode = val; break;\
+                case "11011": Result.ResponseCode = val; break;\
+                case "11031": Result.CardIssuerCode = val; break;\
+            \}\
+        \}\
+\
+        private decimal GetAmount(string val)\
+        \{\
+            if (this.Amount < 0)\
+                return Convert.ToDecimal(val) / 100 * -1;\
+            else\
+                return Convert.ToDecimal(val) / 100;\
+        \}\
+\
+        #endregion\
+\
+        #region Initialize Port and Set Serial Parameters\
+\
+        private void InitializePort()\
+        \{\
+            SerialNET.License license = new SerialNET.License();\
+            license.LicenseKey = "TO1uO7dQfLcUOWesfavFWrhOKkgQABbNTkKI";\
+            port = new SerialNET.Port();\
+            SetParameters();\
+        \}\
+\
+        private void SetParameters()\
+        \{\
+            if (settings.Get("SoftPayComPort").Trim().Length > 0)\
+                port.ComPort = Convert.ToInt32(settings.Get("SoftPayComPort"));\
+            else\
+                port.ComPort = Com;\
+            port.BaudRate = Baud;\
+            port.ByteSize = Databits;\
+\
+            if (StopBits == 2)\
+                port.StopBits = SerialNET.StopBits.Two;\
+            else if (StopBits == 1.5)\
+                port.StopBits = SerialNET.StopBits.OneAndOneHalf;\
+            else\
+                port.StopBits = SerialNET.StopBits.One;\
+\
+            switch (Parity.ToUpper())\
+            \{\
+                case "EVEN": port.Parity = SerialNET.Parity.Even; break;\
+                case "ODD": port.Parity = SerialNET.Parity.Odd; break;\
+                case "MARK": port.Parity = SerialNET.Parity.Mark; break;\
+                case "SPACE": port.Parity = SerialNET.Parity.Space; break;\
+                default: port.Parity = SerialNET.Parity.No; break;\
+            \}\
+\
+            switch (FlowControl.ToUpper())\
+            \{\
+                case "DTR": port.Handshake = SerialNET.Handshake.DTR; break;\
+                case "RTS": port.Handshake = SerialNET.Handshake.RTS; break;\
+                case "NONE": port.Handshake = SerialNET.Handshake.None; break;\
+                case "XON/XOFF": port.Handshake = SerialNET.Handshake.XonXoff; break;\
+                default: port.Handshake = SerialNET.Handshake.None; break;\
+            \}\
+\
+            port.Timeout = 5000;\
+            port.Enabled = true;\
+        \}\
+\
+        #endregion\
+\
+        #region Misc Methodes (ie ACK, NAK, LRC, etc related)\
+\
+        private bool VerifyLRC(string message)\
+        \{\
+            string messageToTest = message.TrimStart(STX.ToCharArray());\
+            messageToTest = messageToTest.Substring(0, messageToTest.Length - 1);\
+            char expectedLRC = GetLRCCharacter(messageToTest);\
+\
+            return expectedLRC == message[message.Length - 1];\
+        \}\
+\
+        private void SendACK()\
+        \{\
+            WriteToPort(ACK);\
+        \}\
+\
+        private void SendNAK()\
+        \{\
+            WriteToPort(NAK);\
+        \}\
+\
+        private bool VeriftyACKReceived()\
+        \{\
+            string ackCheck = ReadFromPort(1, ACKTimeout);\
+            return ackCheck != null && ackCheck == ACK;\
+        \}\
+\
+        #endregion\
+\
+        #region Reading and Writing to Port\
+\
+        private void WriteToPort(string message)\
+        \{\
+            if (LoggingEnabled)\
+                versaLog.WriteToLog("Sending: '" + message + "'");\
+            port.Write(message);\
+        \}\
+\
+        private string ReadFromPort(int bufferSize, int timeOut)\
+        \{\
+            string response = port.Read(bufferSize, timeOut);\
+\
+            if (LoggingEnabled)\
+                versaLog.WriteToLog("Received: '" + response + "'");\
+\
+            return response;\
+        \}\
+\
+        private string ReadFromPort(string startTrigger, string endTrigger, int timeOut)\
+        \{\
+            string response = port.Read(startTrigger, endTrigger, timeOut);\
+\
+            if (LoggingEnabled)\
+                versaLog.WriteToLog("Received: '" + response + "'");\
+\
+            return response;\
+        \}\
+\
+        #endregion\
+\
+\
+        #region Standard Generate Code (Dispose, etc)\
+\
+        /// <summary>\
+        /// Clean up any resources being used.\
+        /// </summary>\
+        protected override void Dispose(bool disposing)\
+        \{\
+            if (disposing)\
+            \{\
+                if (components != null)\
+                \{\
+                    components.Dispose();\
+                \}\
+            \}\
+            base.Dispose(disposing);\
+        \}\
+\
+        #region Windows Form Designer generated code\
+        /// <summary>\
+        /// Required method for Designer support - do not modify\
+        /// the contents of this method with the code editor.\
+        /// </summary>\
+        private void InitializeComponent()\
+        \{\
+            this.lblStatus = new System.Windows.Forms.Label();\
+            this.noProgressBar1 = new NoProgress.NoProgressBar();\
+            this.btnCancel = new System.Windows.Forms.Button();\
+            this.SuspendLayout();\
+            // \
+            // lblStatus\
+            // \
+            this.lblStatus.Location = new System.Drawing.Point(16, 16);\
+            this.lblStatus.Name = "lblStatus";\
+            this.lblStatus.Size = new System.Drawing.Size(208, 16);\
+            this.lblStatus.TabIndex = 0;\
+            this.lblStatus.Text = "Transaction Passed to Pinpad...";\
+            this.lblStatus.TextAlign = System.Drawing.ContentAlignment.TopCenter;\
+            // \
+            // noProgressBar1\
+            // \
+            this.noProgressBar1.BorderStyle = System.Windows.Forms.Border3DStyle.Flat;\
+            this.noProgressBar1.CycleSpeed = 1000;\
+            this.noProgressBar1.Location = new System.Drawing.Point(44, 40);\
+            this.noProgressBar1.Name = "noProgressBar1";\
+            this.noProgressBar1.ShapeSize = 5;\
+            this.noProgressBar1.ShapeSpacing = 9;\
+            this.noProgressBar1.ShapeToDraw = NoProgress.ElementStyle.Circle;\
+            this.noProgressBar1.Size = new System.Drawing.Size(152, 23);\
+            this.noProgressBar1.TabIndex = 3;\
+            this.noProgressBar1.Text = "noProgressBar1";\
+            // \
+            // btnCancel\
+            // \
+            this.btnCancel.FlatStyle = System.Windows.Forms.FlatStyle.Flat;\
+            this.btnCancel.Location = new System.Drawing.Point(83, 80);\
+            this.btnCancel.Name = "btnCancel";\
+            this.btnCancel.TabIndex = 4;\
+            this.btnCancel.Text = "Cancel";\
+            this.btnCancel.Click += new System.EventHandler(this.btnCancel_Click);\
+            // \
+            // SoftPayConnection\
+            // \
+            this.AutoScaleBaseSize = new System.Drawing.Size(5, 13);\
+            this.ClientSize = new System.Drawing.Size(240, 112);\
+            this.ControlBox = false;\
+            this.Controls.Add(this.btnCancel);\
+            this.Controls.Add(this.noProgressBar1);\
+            this.Controls.Add(this.lblStatus);\
+            this.MaximumSize = new System.Drawing.Size(248, 120);\
+            this.MinimumSize = new System.Drawing.Size(248, 120);\
+            this.Name = "SoftPayConnection";\
+            this.SizeGripStyle = System.Windows.Forms.SizeGripStyle.Hide;\
+            this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;\
+            this.Load += new System.EventHandler(this.SoftPayConnection_Load);\
+            this.ResumeLayout(false);\
+\
+        \}\
+        #endregion\
+\
+        private void btnCancel_Click(object sender, System.EventArgs e)\
+        \{\
+            HelpBox.Form1 hb = new HelpBox.Form1("TYPE_VERIFYSOFTPAYCANCEL", null, null, 1);\
+            hb.ShowDialog();\
+            if (hb.AfterYesNoVariable)\
+            \{\
+                WriteToPort(GetResetInterfaceMessage());	\
+                Result.KuberaFormattedResponseMessage = "Cancelled by user.";\
+                if (port != null)\
+                    port.Dispose();\
+                this.Dispose();\
+                this.Close();\
+            \}\
+        \}\
+\
+        #endregion\
+    \}\
+\
+    public class SoftPayResult\
+    \{\
+        public string CreditCardNumber = "";\
+        public string ExpirationDate = "";\
+        public decimal Amount = 0;\
+        public decimal TipAmount = 0;\
+        public string TranCardType = "";\
+        public string Date = "";\
+        public string Time = "";\
+        public string InvoiceNumber = "";\
+        public string ApprovalCode = "";\
+        public string DeclineCode = "";\
+        public string ErrorCode = "";\
+        public string ResponseCode = "";\
+        public string CardIssuerCode = "";\
+\
+        public string KuberaFormattedResponseMessage = "";\
+\
+        public SoftPayResult()\
+        \{\
+        \}\
+    \}\
+\}\
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "Serial Messaging App",
+  "short_name": "Serial Mess",
+  "description": "Connect to extension and serial port",
+  "version": "0.0.1",
+  "minimum_chrome_version": "38",
+
+  "icons": {
+    "16": "assets/icon_16.png",
+    "128": "assets/icon_128.png"
+  },
+
+  "app": {
+    "background": {
+      "scripts": ["background.js"]
+    }
+      
+  },
+  "permissions": [
+    "serial",
+    "webview"
+  ]
+
+}

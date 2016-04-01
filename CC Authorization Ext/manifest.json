@@ -1,0 +1,30 @@
+{
+  "name" : "Inj Mess Ext",
+  "version" : "1.0.0",
+  "description" : "Sample Ext",
+  "page_action" : {
+    "default_title" : "Inj Mess Ext"//,
+//    "default_popup" : "main.html"
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },  
+  "permissions" : [
+    "activeTab",
+    "contextMenus",
+    "tabs",
+    "http://*/*",
+    "https://*/*",
+    "file://*/*",
+    "nativeMessaging"
+   ],
+   "content_scripts": [ {
+    "js": [ "content.js" ],
+    "matches": [ "http://*/*", "https://*/*","file://*/*"],
+    "run_at": "document_start"
+  }],
+   
+  "minimum_chrome_version" : "6.0.0.0",
+  "manifest_version": 2
+}
